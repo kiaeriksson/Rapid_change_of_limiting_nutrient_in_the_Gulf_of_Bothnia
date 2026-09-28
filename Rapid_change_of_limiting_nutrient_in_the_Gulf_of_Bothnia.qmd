@@ -1,0 +1,2063 @@
+---
+title: "Rapid change of limiting nutrient in the Gulf of Bothnia, northern Baltic Sea"
+author: Karolina Eriksson
+editor: visual
+date: now
+format: html
+toc: true
+toc_float: true
+toc_depth: 3
+number_sections: true
+theme: sandstone
+mainfont: Helvetica
+monofont: AndaleMono
+fontsize: "9"
+highlight: textmate
+df_print: paged
+code-fold: true
+code-summary: "Expand code"
+self_contained: true
+embed-resources: true
+keep_md: false
+encoding: "UTF-8"
+---
+
+```{r setup, include=FALSE}
+
+#Keep cache when Render
+knitr::opts_chunk$set(cache = TRUE)
+
+#Exclude warning when Render
+knitr::opts_chunk$set(warning = FALSE)
+
+#Exclude output when Render
+knitr::opts_chunk$set(message = FALSE)
+
+```
+
+# Rapid change of limiting nutrient in the Gulf of Bothnia, northern Baltic Sea
+
+The following code was used to generate the figures in the following published paper:
+
+Huseby S, Andersson A, Eriksson KIA, Brugel S, Ahlgren J (2026) Rapid change of limiting nutrient in the Gulf of Bothnia, northern Baltic Sea. *Sci Rep* **16**, 27798 (2026). <https://doi.org/10.1038/s41598-026-69219-6>
+
+```{r read_libraries}
+
+library(tidyverse)
+library("readxl")
+library(dplyr)
+library(patchwork)
+library(cowplot)
+library(broom)
+
+```
+
+```{r, path}
+#Set working path, to import data and to save images and updated dataframes
+path <- "/Data"
+
+```
+
+# Calculations for the SYKE data set
+
+## Calculate DIN
+
+Ammonium is firstly summed with "nitrite nitrate" when that measurement exists. If it does not exist ammonium is instead summed with the separate measurements. If any of these measurements are missing, DIN is set to NA.
+
+## Recalculate DIN och DIP to "M" from "µg/L"
+
+DIN / 14.00672: Divides DIN in "µg/L" with the molar mass for nitrogen to get the unit "µM".
+
+Phosphate.as.phosphorous / 30.973762: Divides DIP in "µg/L" with the molar mass for phosphorus to get the unit "µM".
+
+```{r, finnish_data_calculations}
+
+#read data
+finska_data <- read.table(paste(path,"finska_data.txt",sep=""), sep="\t", quote='',header=T, fileEncoding = "UTF-8") %>%
+  #Commas to dots
+  mutate(across(everything(), ~ gsub(",", ".", .))) %>%
+  #Calculate DIN
+  mutate(across(c(Ammonium.as.nitrogen, Nitrite.nitrate.as.nitrogen, 
+                  Nitrate.as.nitrogen, Nitrite.as.nitrogen), 
+                ~ as.numeric(.))) %>%
+  mutate(DIN = case_when(
+      !is.na(Nitrite.nitrate.as.nitrogen) ~ Ammonium.as.nitrogen + Nitrite.nitrate.as.nitrogen,
+      is.na(Nitrite.nitrate.as.nitrogen) & 
+        !is.na(Nitrate.as.nitrogen) & !is.na(Nitrite.as.nitrogen) ~ 
+        Ammonium.as.nitrogen + Nitrate.as.nitrogen + Nitrite.as.nitrogen,
+      TRUE ~ NA_real_ )) %>%
+  #Calculate to M
+  mutate(across(c(DIN, Phosphate.as.phosphorous), ~ as.numeric(.))) %>%
+  mutate(DIN_uM = DIN / 14.00672,
+         DIP_uM = Phosphate.as.phosphorous / 30.973762 )
+
+```
+
+## Filter the SYKE data set
+
+Filter out only the winter months december-march and sort these into the same winter season. Sort from year 1994-2022. Only use depths between 0-10m. Proceed with stations P1, P LAV4, Raahen ed RE15, Vav-11 V-4, Vav-10 V-3, Tallvarpen, Raum 385 and Raum 395.
+
+```{r, finnish_data_filtered}
+
+finnish_filtered <- finska_data %>%
+  mutate(Year = as.numeric(substr(time, 1, 4))) %>%
+  mutate(Month = substr(time, 6, 7)) %>%
+  mutate(Date = substr(time, 1, 10)) %>%
+  mutate(Date_Station = paste(Date, site, sep = "_")) %>%
+  #Filter out years of interest
+  filter(Year >= 1994 & Year <= 2022) %>%
+  #Filter out months of interest
+  filter(Month == "12" |
+          Month == "01"|
+          Month == "02"|
+          Month == "03") %>%
+  #Sort december together with the following years winter season
+  mutate(
+    Winter_Season = case_when(
+      Month %in% c("01", "02", "03") ~ paste0(Year),
+      Month == "12" ~ paste0(Year + 1),
+      TRUE ~ NA_character_  )) %>%
+  #Filter out depths of interest (0-10m)
+      # Extrahera det högsta värdet från varje värde eller intervall
+   mutate( max_depth = if_else(
+      str_detect(sampleDepthM, "-"),                        # Om det är ett intervall
+      as.numeric(str_extract(sampleDepthM, "\\d+\\.?\\d*$")), # Extrahera sista numret i intervallet
+      as.numeric(sampleDepthM)                              # Om inte, konvertera direkt till numeriskt
+    )) %>%
+  # Filtrera based on max_depth
+  filter(max_depth <= 10) %>%
+  #Filter out stations of interest
+  filter(  site == "PERÃ„MERI 1"  | #"P1"
+           site == "PERÃ„MERI LAV4" | #P LAV4
+           site == "Raahen ed RE15" |
+           site == "Vav-11 V-4" |
+           site == "Vav-10 V-3" |
+           site == "Tallvarpen" |
+           site == "Raum 385 JÃ¤rvil luot" |
+           site == "Raum 395 Rounakari" )
+
+```
+
+## Calculate averages for depths 0-10m
+
+Filter out columns of interest and create a column for the category of "Limiting nutrient". Ad basin information for each station. Simplify the station names.
+
+Also ad a column for limiting nutrient that divides into groups based on the DIN:DIP ratio:\
+\* DIN.DIP \> 20 --\> P-lim\
+\* 12 \< DIN.DIP \< 20 --\> Greyzone/Balanced\
+\* 6 \< DIN.DIP \< 12 --\> N-lim\
+\* 0 \< DIN.DIP \< 6 --\> very N-lim
+
+```{r, depth_averages_finnish}
+## Average DIN and DIP dor depths 0-10m
+depth_averages_finnish <- finnish_filtered %>%  
+  #Calculate averages for values that has the same station and group
+  group_by(Date_Station, Date, site, Havsomr, Year, Month, Winter_Season, siteLatitudeWGS84, siteLongitudeWGS84) %>%
+  summarise(
+            Total.nitrogen = mean(as.numeric(`Total.nitrogen`), na.rm = TRUE),
+            Total.phosphorous = mean(as.numeric(`Total.phosphorous`), na.rm = TRUE),
+            DIN_uM = mean(as.numeric(`DIN_uM`), na.rm = TRUE),
+            DIP_uM = mean(as.numeric(`DIP_uM`), na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(DIN.DIP = DIN_uM/DIP_uM) %>%
+  mutate(TotalN.TotalP = Total.nitrogen/Total.phosphorous) %>%
+  #Set levels of the limiting nutrient status based on DIN:DIP
+  mutate(Limiting_nutrient = case_when(
+    DIN.DIP > 20 ~ "P-lim",
+    DIN.DIP >= 12 & DIN.DIP <= 20 ~ "Greyzone/Balanced",
+    DIN.DIP < 12 & DIN.DIP > 6 ~ "N-lim",
+    DIN.DIP <= 6 ~ "very_N-lim")) %>%
+  mutate(Limiting_nutrient = factor(Limiting_nutrient, levels = c("very_N-lim", "N-lim", "Greyzone/Balanced", "P-lim"))) %>%
+  #Create column Station to use instead of site. Match with map. Shorten name of Raum.
+  mutate(Station = case_when(
+          site %in% c("PERÃ„MERI 1") ~ "P1",
+          site %in% c("PERÃ„MERI LAV4") ~ "P LAV4",
+          site %in% c("Raahen ed RE15") ~ "Raahen ed RE15",
+          site %in% c("Vav-11 V-4") ~ "Vav-11 V-4",
+          site %in% c("Vav-10 V-3") ~ "Vav-10 V-3",
+          site %in% c("Tallvarpen") ~ "Tallvarpen",
+          site %in% c("Raum 385 JÃ¤rvil luot") ~ "Raum 385",
+          site %in% c("Raum 395 Rounakari") ~ "Raum 395"  )) %>%
+ # Add Type column (all are "Coast")
+  mutate(Type = "Coast") %>%
+#Ad Location: Finnish Coast
+  mutate(Location = "Finnish Coast") %>%
+  # Add Basin column based on site
+  mutate(Basin = case_when(
+    Station %in% c("P1", "P LAV4", "Raahen ed RE15") ~ "Bothnian Bay",
+    TRUE ~ "Bothnian Sea"  # Default to Bothnian Sea for other stations
+  ))
+```
+
+# Read and filter the SHARK data set
+
+Handle Q-flags: https://www.smhi.se/oceanografi/oce_info_data/shark_web/downloads/SMHI_QC.pdf
+
+If Q-flag == "\<" --\> Take half of reported value.
+
+If Q-flag == "S" --\> Remove suspect value.
+
+```{r, read_SMHI_data}
+
+#read data and handle Q-flags
+smhi <- read_excel(paste(path,"Svenska kustdata från SHARK.xlsx",sep="")) %>%
+    select(`Vattenförekomst`, `År`, `Månad`, `Provtagningsdatum`, `Provtagningsdjup (m)`, `Provets latitud (DD)`, `Provets longitud (DD)`,
+         `Total fosfor Tot-P (umol/l)`, `Q-flagga Total fosfor Tot-P`,
+         `Total kväve Tot-N (umol/l)`, `Q-flagga Total kväve Tot-N`,
+         `Fosfatfosfor PO4-P (umol/l)`, `Q-flagga Fosfatfosfor PO4-P`,
+         `Nitritkväve NO2-N (umol/l)`, `Q-flagga Nitritkväve NO2-N`,
+         `Nitratkväve NO3-N (umol/l)`, `Q-flagga Nitratkväve NO3-N`,
+         `Nitrit+Nitratkväve NO2+NO3-N (umol/l)`, `Q-flagga Nitrit+Nitratkväve NO2+NO3-N`,
+         `Ammoniumkväve NH4-N (umol/l)`, `Q-flagga Ammoniumkväve NH4-N`) %>%
+  mutate(across(c(`Ammoniumkväve NH4-N (umol/l)`, 
+                  `Nitrit+Nitratkväve NO2+NO3-N (umol/l)`, 
+                 `Nitratkväve NO3-N (umol/l)`, 
+                  `Nitritkväve NO2-N (umol/l)`), 
+                ~ as.numeric(.))) %>%
+  #Convert all Q-flag columns to type character
+   mutate(across(starts_with("Q-flagga"), as.character)) %>%
+  # Remove problematic Q-flag column
+  # select(-`Q-flagga Syrgashalt O2 vattenhämtare`) %>%
+  # Handle q-flagga för Total fosfor Tot-P
+  mutate(`Total fosfor Tot-P (umol/l)` = case_when(
+    `Q-flagga Total fosfor Tot-P` == "<" ~ as.numeric(`Total fosfor Tot-P (umol/l)`) / 2,
+    `Q-flagga Total fosfor Tot-P` == "S" ~ NA_real_,
+    TRUE ~ as.numeric(`Total fosfor Tot-P (umol/l)`)
+  )) %>%
+  # Handle q-flag for Total kväve Tot-N
+  mutate(`Total kväve Tot-N (umol/l)` = case_when(
+    `Q-flagga Total kväve Tot-N` == "<" ~ as.numeric(`Total kväve Tot-N (umol/l)`) / 2,
+    `Q-flagga Total kväve Tot-N` == "S" ~ NA_real_,
+    TRUE ~ as.numeric(`Total kväve Tot-N (umol/l)`)
+  )) %>%
+  # Handle q-flag for Fosfatfosfor PO4-P
+  mutate(`Fosfatfosfor PO4-P (umol/l)` = case_when(
+    `Q-flagga Fosfatfosfor PO4-P` == "<" ~ as.numeric(`Fosfatfosfor PO4-P (umol/l)`) / 2,
+    `Q-flagga Fosfatfosfor PO4-P` == "S" ~ NA_real_,
+    TRUE ~ as.numeric(`Fosfatfosfor PO4-P (umol/l)`)
+  )) %>%
+  # Handle q-flag for Nitritkväve NO2-N
+  mutate(`Nitritkväve NO2-N (umol/l)` = case_when(
+    `Q-flagga Nitritkväve NO2-N` == "<" ~ as.numeric(`Nitritkväve NO2-N (umol/l)`) / 2,
+    `Q-flagga Nitritkväve NO2-N` == "S" ~ NA_real_,
+    TRUE ~ as.numeric(`Nitritkväve NO2-N (umol/l)`)
+  )) %>%
+  # Handle q-flag for Nitratkväve NO3-N
+  mutate(`Nitratkväve NO3-N (umol/l)` = case_when(
+    `Q-flagga Nitratkväve NO3-N` == "<" ~ as.numeric(`Nitratkväve NO3-N (umol/l)`) / 2,
+    `Q-flagga Nitratkväve NO3-N` == "S" ~ NA_real_,
+    TRUE ~ as.numeric(`Nitratkväve NO3-N (umol/l)`)
+  )) %>%
+  # Handle q-flag for Nitrit+Nitratkväve NO2+NO3-N
+  mutate(`Nitrit+Nitratkväve NO2+NO3-N (umol/l)` = case_when(
+    `Q-flagga Nitrit+Nitratkväve NO2+NO3-N` == "<" ~ as.numeric(`Nitrit+Nitratkväve NO2+NO3-N (umol/l)`) / 2,
+    `Q-flagga Nitrit+Nitratkväve NO2+NO3-N` == "S" ~ NA_real_,
+    TRUE ~ as.numeric(`Nitrit+Nitratkväve NO2+NO3-N (umol/l)`)
+  )) %>%
+  # Handle q-flag for Ammoniumkväve NH4-N
+  mutate(`Ammoniumkväve NH4-N (umol/l)` = case_when(
+    `Q-flagga Ammoniumkväve NH4-N` == "<" ~ as.numeric(`Ammoniumkväve NH4-N (umol/l)`) / 2,
+    `Q-flagga Ammoniumkväve NH4-N` == "S" ~ NA_real_,
+    TRUE ~ as.numeric(`Ammoniumkväve NH4-N (umol/l)`)
+  ))
+
+```
+
+## Filter SHARK data
+
+Perform calculations and data filtration as for the SYKE data. Select stations Gårdsfjärden, "Söderhamnsfjärden, Ljusnefjärden och Östhammar.
+
+```{r, filter_SMHI_data}
+
+smhi_filtered <- smhi %>%
+  #Select columns of interest
+  select(`Vattenförekomst`, `År`, `Månad`, `Provtagningsdatum`, `Provtagningsdjup (m)`, `Provets latitud (DD)`, `Provets longitud (DD)`,
+         `Total fosfor Tot-P (umol/l)`, `Q-flagga Total fosfor Tot-P`,
+         `Total kväve Tot-N (umol/l)`, `Q-flagga Total kväve Tot-N`,
+         `Fosfatfosfor PO4-P (umol/l)`, `Q-flagga Fosfatfosfor PO4-P`,
+         `Nitritkväve NO2-N (umol/l)`, `Q-flagga Nitritkväve NO2-N`,
+         `Nitratkväve NO3-N (umol/l)`, `Q-flagga Nitratkväve NO3-N`,
+         `Nitrit+Nitratkväve NO2+NO3-N (umol/l)`, `Q-flagga Nitrit+Nitratkväve NO2+NO3-N`,
+         `Ammoniumkväve NH4-N (umol/l)`, `Q-flagga Ammoniumkväve NH4-N`) %>%
+  #Calculate DIN
+  mutate(across(c(`Ammoniumkväve NH4-N (umol/l)`, 
+                  `Nitrit+Nitratkväve NO2+NO3-N (umol/l)`, 
+                 `Nitratkväve NO3-N (umol/l)`, 
+                  `Nitritkväve NO2-N (umol/l)`), 
+                ~ as.numeric(.))) %>%
+  mutate(DIN = case_when(
+      !is.na(`Nitrit+Nitratkväve NO2+NO3-N (umol/l)`) ~ `Ammoniumkväve NH4-N (umol/l)` + `Nitrit+Nitratkväve NO2+NO3-N (umol/l)`,
+      is.na(`Nitrit+Nitratkväve NO2+NO3-N (umol/l)`) & 
+        !is.na(`Nitratkväve NO3-N (umol/l)`) & !is.na(`Nitritkväve NO2-N (umol/l)`) ~ 
+        `Ammoniumkväve NH4-N (umol/l)` + `Nitratkväve NO3-N (umol/l)` + `Nitritkväve NO2-N (umol/l)`,
+      TRUE ~ NA_real_ )) %>%
+  #No need to recalculate since 1 µM = 1 µmol/l. Rename columns to match with finnish data
+  mutate(across(c(DIN, `Fosfatfosfor PO4-P (umol/l)`), ~ as.numeric(.))) %>%
+  mutate(DIN_uM = DIN,
+         DIP_uM = `Fosfatfosfor PO4-P (umol/l)`,
+         Total.nitrogen = `Total kväve Tot-N (umol/l)`,
+         Total.phosphorous = `Total fosfor Tot-P (umol/l)` ) %>%
+  #Filter stations of interest
+  filter( Vattenförekomst == "Gårdsfjärden" |
+          Vattenförekomst == "Söderhamnsfjärden" |
+          Vattenförekomst == "Ljusnefjärden" |
+          Vattenförekomst == "Östhammars kustvatten") %>%
+  mutate(Vattenförekomst = case_when(Vattenförekomst == "Östhammars kustvatten" ~ "Östhammar", TRUE ~ Vattenförekomst)) %>%
+  #Create columns to match with the finnish data
+  mutate(Year = as.numeric(År)) %>%
+  mutate(Month = as.numeric(Månad)) %>%
+  mutate(Date = Provtagningsdatum) %>%
+  mutate(Date_Station = paste(Date, Vattenförekomst, sep = "_")) %>%
+  #Filter out years of interest
+  filter(Year >= 1994 & Year <= 2022) %>%
+  #Filter out months of interest
+  filter(Month == "12" |
+          Month == "1"|
+          Month == "2"|
+          Month == "3") %>%
+  #Sort december together with the following years winter season
+  mutate(
+    Winter_Season = case_when(
+      Month %in% c("1", "2", "3") ~ paste0(Year),
+      Month == "12" ~ paste0(Year + 1),
+      TRUE ~ NA_character_  )) %>%
+  #Filter sampling depths <= 10
+  filter(as.numeric(`Provtagningsdjup (m)`) <= 10) %>%
+  #Match with other datasets by creating a Station-column
+  mutate(Station = Vattenförekomst)
+```
+
+## Depth averages SHARK
+
+```{r, depth_averages_smhi}
+
+depth_averages_smhi <- smhi_filtered %>%  
+  select(`Vattenförekomst`, Year, Month, `Provtagningsdatum`, `Provtagningsdjup (m)`, Winter_Season, `Provets latitud (DD)`, `Provets longitud (DD)`, DIN_uM, DIP_uM, Date_Station, Total.nitrogen, Total.phosphorous,
+         `Total fosfor Tot-P (umol/l)`, `Q-flagga Total fosfor Tot-P`,
+         `Total kväve Tot-N (umol/l)`, `Q-flagga Total kväve Tot-N`,
+         `Fosfatfosfor PO4-P (umol/l)`, `Q-flagga Fosfatfosfor PO4-P`,
+         `Nitritkväve NO2-N (umol/l)`, `Q-flagga Nitritkväve NO2-N`,
+         `Nitratkväve NO3-N (umol/l)`, `Q-flagga Nitratkväve NO3-N`,
+         `Nitrit+Nitratkväve NO2+NO3-N (umol/l)`, `Q-flagga Nitrit+Nitratkväve NO2+NO3-N`,
+         `Ammoniumkväve NH4-N (umol/l)`, `Q-flagga Ammoniumkväve NH4-N`) %>%
+  #Calculate averages for values that has the same station and group
+  group_by(Date_Station, Vattenförekomst, Year, Month, Winter_Season, `Provets latitud (DD)`, `Provets longitud (DD)`) %>%
+  summarise(
+            Total.nitrogen = mean(as.numeric(`Total.nitrogen`), na.rm = TRUE),
+            Total.phosphorous = mean(as.numeric(`Total.phosphorous`), na.rm = TRUE),
+            DIN_uM = mean(as.numeric(`DIN_uM`), na.rm = TRUE),
+            DIP_uM = mean(as.numeric(`DIP_uM`), na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(DIN.DIP = DIN_uM/DIP_uM) %>%
+  mutate(TotalN.TotalP = Total.nitrogen/Total.phosphorous) %>%
+  #Set levels of the limiting nutrient status based on DIN:DIP
+  mutate(Limiting_nutrient = case_when(
+    DIN.DIP > 20 ~ "P-lim",
+    DIN.DIP >= 12 & DIN.DIP <= 20 ~ "Greyzone/Balanced",
+    DIN.DIP < 12 & DIN.DIP > 6 ~ "N-lim",
+    DIN.DIP <= 6 ~ "very_N-lim")) %>%
+  mutate(Limiting_nutrient = factor(Limiting_nutrient, levels = c("very_N-lim", "N-lim", "Greyzone/Balanced", "P-lim"))) %>%
+  #Ad Type: Coast or Offshore
+    mutate(Type = case_when(
+    Vattenförekomst %in% c("Gårdsfjärden", "Söderhamnsfjärden", "Ljusnefjärden", "Östhammar") ~ "Coast", 
+    TRUE ~ NA_character_  )) %>%
+  #Ad Location: Swedish Coast
+  mutate(Location = case_when(
+    Vattenförekomst %in% c("Gårdsfjärden", "Söderhamnsfjärden", "Ljusnefjärden", "Östhammar") ~ "Swedish Coast", 
+    TRUE ~ NA_character_  )) %>%
+  # Add Basin
+  mutate(Basin = case_when(
+    Vattenförekomst %in% c("Gårdsfjärden", "Söderhamnsfjärden", "Ljusnefjärden", "Östhammar") ~ "Bothnian Sea",
+    TRUE ~ NA_character_  )) %>%
+  #Match with other datasets by creating a Station-column
+  mutate(Station = Vattenförekomst)
+
+```
+
+# Read SR3 data
+
+Read SR3 (C24) data from SYKE (Finnish monitoring). This is the same station as C24 in dBotnia (Swedish monitoring). Repeat all filtering and calculation steps as for the SYKE dataset. They could not be combined in the beginning since not all column names are the same.
+
+```{r, read_sr3}
+
+#read data
+depth_averages_sr3 <- read_excel(paste(path,"Vattenkvalitet_uttagymparisto_250109_SR3-C24.xlsx",sep="")) %>%
+  #Create missing columns so can use same calculations as before
+  mutate(`Nitrate as nitrogen µg/l` = NA_real_ ) %>%
+  #Convert to numeric values
+    mutate(across(c(`Ammonium as nitrogen µg/l`, `Nitrite nitrate as nitrogen µg/l`, 
+                  `Nitrate as nitrogen µg/l`, `Nitrite as nitrogen µg/l`), 
+                ~ as.numeric(.))) %>%
+  #Calculate DIN
+  mutate(DIN = case_when(
+  !is.na(`Nitrite nitrate as nitrogen µg/l`) ~ as.numeric(`Ammonium as nitrogen µg/l`) + as.numeric(`Nitrite nitrate as nitrogen µg/l`),
+  is.na(`Nitrite nitrate as nitrogen µg/l`) & 
+    !is.na(`Nitrate as nitrogen µg/l`) & !is.na(`Nitrite as nitrogen µg/l`) ~ 
+    as.numeric(`Ammonium as nitrogen µg/l`) + as.numeric(`Nitrate as nitrogen µg/l`) + as.numeric(`Nitrite as nitrogen µg/l`),
+  TRUE ~ NA_real_)) %>%
+  #Recalculate to µM
+    mutate(across(c(DIN, `Phosphate as phosphorous µg/l`), ~ as.numeric(.))) %>%
+  mutate(DIN_uM = DIN / 14.00672,
+         DIP_uM = `Phosphate as phosphorous µg/l` / 30.973762 ) %>%
+  mutate(Year = as.numeric(substr(time, 1, 4))) %>%
+  mutate(Month = substr(time, 6, 7)) %>%
+  mutate(Date = substr(time, 1, 10)) %>%
+  mutate(Date_Station = paste(Date, site, sep = "_")) %>%
+  #Filter out years of interest
+  filter(Year >= 1994 & Year <= 2022) %>%
+  #Filter out months of interest
+  filter(Month == "12" |
+          Month == "01"|
+          Month == "02"|
+          Month == "03") %>%
+  #Sort december together with the following years winter season
+  mutate(
+    Winter_Season = case_when(
+      Month %in% c("01", "02", "03") ~ paste0(Year),
+      Month == "12" ~ paste0(Year + 1),
+      TRUE ~ NA_character_  )) %>%
+  #Filter out depths of interest (0-10m)
+      # Extrahera det högsta värdet från varje värde eller intervall
+   mutate( max_depth = if_else(
+      str_detect(sampleDepthM, "-"),                        # Om det är ett intervall
+      as.numeric(str_extract(sampleDepthM, "\\d+\\.?\\d*$")), # Extrahera sista numret i intervallet
+      as.numeric(sampleDepthM)                              # Om inte, konvertera direkt till numeriskt
+    )) %>%
+  # Filtrera baserat på max_depth
+  filter(max_depth <= 10) %>%
+    #Calculate averages for values that has the same station and group
+  group_by(Date_Station, Date, site, Year, Month, Winter_Season, siteLatitudeWGS84, siteLongitudeWGS84) %>%
+  summarise(
+            Total.nitrogen = mean(as.numeric(`Total nitrogen µg/l`), na.rm = TRUE),
+            Total.phosphorous = mean(as.numeric(`Total phosphorous µg/l`), na.rm = TRUE),
+            DIN_uM = mean(as.numeric(`DIN_uM`), na.rm = TRUE),
+            DIP_uM = mean(as.numeric(`DIP_uM`), na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(DIN.DIP = DIN_uM/DIP_uM) %>%
+  mutate(TotalN.TotalP = Total.nitrogen/Total.phosphorous) %>%
+  #Set levels of the limiting nutrient status based on DIN:DIP
+  mutate(Limiting_nutrient = case_when(
+    DIN.DIP > 20 ~ "P-lim",
+    DIN.DIP >= 12 & DIN.DIP <= 20 ~ "Greyzone/Balanced",
+    DIN.DIP < 12 & DIN.DIP > 6 ~ "N-lim",
+    DIN.DIP <= 6 ~ "very_N-lim")) %>%
+  mutate(Limiting_nutrient = factor(Limiting_nutrient, levels = c("very_N-lim", "N-lim", "Greyzone/Balanced", "P-lim"))) %>%
+  #Create column Station to use instead of site. Match with map. Rename SR3 to C24/SR3.
+  mutate(Station = case_when(
+          site %in% c("SR3") ~ "C24/SR3")) %>%
+ # Add Type column (all are "Offshore")
+  mutate(Type = "Offshore") %>%
+  # Add Basin column based on site
+  mutate(Basin = "Bothnian Sea") %>%
+#Ad Location: OFFshore
+  mutate(Location = "Offshore")
+
+```
+
+# Read dBotnia data
+
+Calculate winter season as before and match column names with the previous data sets. Take half of the measured value when the Q-value is on the detection limit, as for the SHARK data. Filter station "RA2","A5", "A13", "B3", "B7", "GA1", "C1", "C3", "C14", "C24/SR3". The name of station C24 is changes to C24/SR3 to later be combined with the SYKE data set.
+
+```{r, read_dbotnia}
+
+#Chemistry from dBotnia - Calculated data
+depth_averages_dbotnia <- read.table(paste(path,"dBotnia - Kemidata - discrete depths.csv",sep=""), sep="\t", quote='',header=T, fileEncoding = "latin1" )   %>%
+  #Use Date instead of Cruise to match with other datasets ID
+  mutate(Date = substr(SampleDate, 1, 10)) %>%
+  #Create unique ID for Cruise combined with Station. Match with finnish data --> Use the name "Date" instead of cruise
+  mutate(Date_Station = paste(Date, Station, sep = "_")) %>%
+  #Create column for Year from the Cruise column
+  mutate(Year = substr(Cruise, 1, 4)) %>%
+  mutate(Year = as.numeric(substr(Year, 1, 4))) %>%
+  #Remove years before 1994 and after 2022 by 
+  filter(Year >= 1994 & Year <= 2022) %>%
+  #Select stations
+  filter( Station == "A5" |
+          Station == "A13" |
+          Station == "B3" |
+          Station == "B7" | 
+          Station == "C1" |
+          Station == "C3" |
+          Station == "C14" |
+          Station == "C24" |
+          Station == "GA1" |
+          Station == "RA2" ) %>%
+  # Match with map. Rename C24 to C24/SR3. Keep other stations unchanged
+mutate(Station = case_when(
+  Station == "C24" ~ "C24/SR3", TRUE ~ Station)) %>%
+  #Filter out depths of interest (0-10m)
+  filter(Depth..decibar. =="0" |
+          Depth..decibar. =="1" |
+          Depth..decibar. =="2" |
+          Depth..decibar. =="4" |
+          Depth..decibar. =="6" |
+          Depth..decibar. =="8" | 
+         Depth..decibar. =="10") %>%
+  #select measurements/information of interest
+  select(Date_Station, Cruise, Station, DOC...M., Seccidepth..m., Temperature..ºC., Salinity..psu., pH, Total.N...M., Total.P...M., NO3...M., NO2...M., NH4...M., PO4.P...M., SiO4...M., Humus...g.l., ChlA...g.l., CO2fixation..µg.C.dm..3.d..1., BactAbund..cells.dm..3., BactGrowth..cells.dm..3.d..1., BactResp.µmol.O2.dm.3.d.1., Year, SampleDate, q_PO4.P, q_NO3, q_NO2, q_NH4, q_Total.N, q_Total.P) %>%
+  #replace all commas for dots.
+  mutate_at(vars(DOC...M., Seccidepth..m., Temperature..ºC., Salinity..psu., pH, Total.N...M., Total.P...M., NO3...M., NO2...M., NH4...M., PO4.P...M., SiO4...M., Humus...g.l., ChlA...g.l., CO2fixation..µg.C.dm..3.d..1., BactAbund..cells.dm..3., BactGrowth..cells.dm..3.d..1., BactResp.µmol.O2.dm.3.d.1.), 
+             list(~ gsub(",", ".", .))) %>%
+  #Calculate a column for nutrients depending on the quality score, set half the value of the detection limit
+  mutate(PO4P = ifelse(q_PO4.P == 7, 0.5*as.numeric(PO4.P...M.) , PO4.P...M.),
+         NO3 = ifelse(q_NO3 == 7, 0.5*as.numeric(NO3...M.) , NO3...M.),
+         NO2 = ifelse(q_NO2 == 7, 0.5*as.numeric(NO2...M.) , NO2...M.),
+         NH4 = ifelse(q_NH4 == 7, 0.5*as.numeric(NH4...M.) , NH4...M.),
+         TotN = ifelse(q_Total.N == 7, 0.5*as.numeric(Total.N...M.), Total.N...M.),
+         TotP = ifelse(q_Total.P == 7, 0.5*as.numeric(Total.P...M.), Total.P...M.) ) %>%
+  #Calculate a column for DIN and DIP
+  mutate(DIN = ( as.numeric(`NO3`) + as.numeric(`NO2`) + as.numeric(`NH4`) )) %>%
+  mutate(DIP = ( as.numeric(`PO4P`) )) %>%
+  #Calculate a column for the N:P ratio (DIN:DIP)
+  mutate(DIN.DIP = ( as.numeric(`NO3`) + as.numeric(`NO2`) + as.numeric(`NH4`) ) / as.numeric(`PO4P`) ) %>%
+  #Calculate a column for Total N and Total P ratio
+  mutate(TotalN.TotalP = as.numeric(`TotN`)/as.numeric(`TotP`)) %>%
+  #Calculate averages for values that has the same station and group
+  group_by(Cruise, Station, Date_Station) %>%
+  summarise(
+            DOC = mean(as.numeric(`DOC...M.`), na.rm = TRUE),
+            Seccidepth = mean(as.numeric(`Seccidepth..m.`), na.rm = TRUE),
+            Temp = mean(as.numeric(`Temperature..ºC.`), na.rm = TRUE),
+            Salinity = mean(as.numeric(`Salinity..psu.`), na.rm = TRUE),
+            Total.nitrogen = mean(as.numeric(`TotN`), na.rm = TRUE),
+            Total.phosphorous = mean(as.numeric(`TotP`), na.rm = TRUE),
+            NO3 = mean(as.numeric(`NO3`), na.rm = TRUE),
+            NO2 = mean(as.numeric(`NO2`), na.rm = TRUE),
+            NH4 = mean(as.numeric(`NH4`), na.rm = TRUE),
+            PO4P = mean(as.numeric(`PO4P`), na.rm = TRUE),
+            SiO4 = mean(as.numeric(`SiO4...M.`), na.rm = TRUE),
+            Humus = mean(as.numeric(`Humus...g.l.`), na.rm = TRUE),
+            ChlA = mean(as.numeric(`ChlA...g.l.`), na.rm = TRUE),
+            CO2fix = mean(as.numeric(`CO2fixation..µg.C.dm..3.d..1.`), na.rm = TRUE),
+            BactAbund = mean(as.numeric(`BactAbund..cells.dm..3.`), na.rm = TRUE),
+            BactGrowth = mean(as.numeric(`BactGrowth..cells.dm..3.d..1.`), na.rm = TRUE),
+            BactResp = mean(as.numeric(`BactResp.µmol.O2.dm.3.d.1.`), na.rm = TRUE),
+            DIN_uM = mean(as.numeric(`DIN`), na.rm = TRUE),
+            DIP_uM = mean(as.numeric(`DIP`), na.rm = TRUE),
+            DIN.DIP = mean(as.numeric(`DIN.DIP`), na.rm = TRUE),
+            TotalN.TotalP = mean(as.numeric(`TotalN.TotalP`), na.rm = TRUE),
+            Year = mean(as.numeric(`Year`), na.rm = TRUE),
+            Month = str_split(first(SampleDate), "-") %>% sapply(`[[`, 2),
+            ) %>%
+  #Set levels of the limiting nutrient status based on DIN:DIP
+  mutate(Limiting_nutrient = case_when(
+    DIN.DIP > 20 ~ "P-lim",
+    DIN.DIP >= 12 & DIN.DIP <= 20 ~ "Greyzone/Balanced",
+    DIN.DIP < 12 & DIN.DIP > 6 ~ "N-lim",
+    DIN.DIP <= 6 ~ "very_N-lim")) %>%
+  mutate(Limiting_nutrient = factor(Limiting_nutrient, levels = c("very_N-lim", "N-lim", "Greyzone/Balanced", "P-lim"))) %>%
+    #Ad column for Basin 
+  mutate(Basin = case_when(
+    Station %in% c("RA2","A5", "A13") ~ "Bothnian Bay",
+    Station %in% c("B3", "B7", "GA1", "C1", "C3", "C14", "C24/SR3") ~ "Bothnian Sea" )) %>%
+  #Sort out winter months
+  filter( Month == "01" | 
+          Month == "02" | 
+          Month =="03" | 
+          Month =="12") %>%
+  #Sort december together with the following years winter season
+  mutate(Winter_Season = case_when(
+      Month %in% c("01", "02", "03") ~ paste0(Year),
+      Month == "12" ~ paste0(Year + 1),
+      TRUE ~ NA_character_  )) %>%
+  #Ad Basin
+ mutate(Basin = case_when(
+    Station %in% c("A5", "A13") ~ "Bothnian Bay",
+    Station %in% c("C1", "C3", "C14", "C24/SR3") ~ "Bothnian Sea",
+    Station %in% c("B3", "B7") ~ "Bothnian Sea",
+    Station %in% c("GA1") ~ "Bothnian Sea",
+    Station %in% c("RA2") ~ "Bothnian Bay")) %>%
+  #Ad Type
+  mutate(Type = case_when(
+    Station %in% c("A5", "A13", "C1", "C3", "C14", "C24/SR3") ~ "Offshore", 
+    TRUE ~ "Coast"  )) %>%
+  #Ad Location: Swedish Coast
+  mutate(Location = case_when(
+    Station %in% c("A5", "A13", "C1", "C3", "C14", "C24/SR3") ~ "Offshore", 
+    TRUE ~ "Swedish Coast"  ))
+
+```
+
+# Merge datasets
+
+```{r, merge_datasets}
+
+# Select only the required columns before the join
+depth_averages_combined <- depth_averages_dbotnia %>%
+  ungroup() %>%
+  select(Station, Type, Location, Date_Station, Basin, DIN_uM, DIP_uM, Total.nitrogen, Total.phosphorous, DIN.DIP, Winter_Season, Limiting_nutrient) %>%
+  full_join(
+    depth_averages_sr3 %>% 
+      select(Station, Type, Location, Date_Station, Basin, DIN_uM, DIP_uM, Total.nitrogen, Total.phosphorous, DIN.DIP, Winter_Season, Limiting_nutrient), 
+    by = c("Station", "Type", "Location", "Date_Station", "Basin", "DIN_uM", "DIP_uM", "Total.nitrogen", "Total.phosphorous", "DIN.DIP", "Winter_Season", "Limiting_nutrient") ) %>%
+  full_join(
+    depth_averages_finnish %>%
+      select(Station, Type, Location, Date_Station, Basin, DIN_uM, DIP_uM, Total.nitrogen, Total.phosphorous, DIN.DIP, Winter_Season, Limiting_nutrient), 
+    by = c("Station", "Type", "Location", "Date_Station", "Basin", "DIN_uM", "DIP_uM", "Total.nitrogen", "Total.phosphorous", "DIN.DIP", "Winter_Season", "Limiting_nutrient") ) %>%
+  full_join(
+    depth_averages_smhi %>%
+      select(Station, Type, Location, Date_Station, Basin, DIN_uM, DIP_uM, Total.nitrogen, Total.phosphorous, DIN.DIP, Winter_Season, Limiting_nutrient), 
+    by = c("Station", "Type", "Location", "Date_Station", "Basin", "DIN_uM", "DIP_uM", "Total.nitrogen", "Total.phosphorous", "DIN.DIP", "Winter_Season", "Limiting_nutrient") )
+
+```
+
+# Figures - DIN:DIP
+
+## Linear Regression - Per Station
+
+This figure below has the final station order used in the reviewed manuscript, arranged from north to south.
+
+Line fitting comparison:
+
+Instead of a barplot with many smaller figures, arrange the stations in a scatterplot divided into 6 panels depending on Basin (Bothnian Bay or Bothnian Sea) and Location (Coast or Offshore). For visualizing spatiotemporal trends, we compared different line fittings to find the most suitable option.
+
+3 alternatives were evaluated:\
+\* Linear regression,\
+\* Moving average with loess smoothing\
+\* GAM spline-smoothing
+
+Linear regression was the best fit, the other alternatives is no longer shown in the code.
+
+```{r, fitting_average_fig1, fig.width=10, fig.height=10}
+#| label: fig-linefitting_linear
+#| fig-cap: The figure explores the most suitable option for displaying spatiotemporal trends in DIN:DIP. Overall, the linear trend seem to capture this decently.
+
+# 1. Linjär regression: Enkel linjär modell för att visa trenden
+combined_plot_linear <- depth_averages_combined %>%
+  mutate(Station = factor(Station, levels = c("RA2", 
+                                               "P1", 
+                                               "P LAV4", 
+                                               "A5",
+                                               "A13",
+                                               "Raahen ed RE15",
+                                               "B3", 
+                                               "B7", 
+                                               "Vav-11 V-4", 
+                                               "Vav-10 V-3",
+                                               "GA1", 
+                                               "C3",
+                                               "C1",
+                                               "Tallvarpen", 
+                                               "C14",
+                                               "Gårdsfjärden", 
+                                               "Söderhamnsfjärden", 
+                                               "Ljusnefjärden", 
+                                               "C24/SR3",
+                                               "Raum 385", 
+                                               "Raum 395",
+                                               "Östhammar"))) %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore"))) %>%
+  mutate(Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea"))) %>%
+  filter(!is.na(DIN.DIP)) %>%
+  mutate(Winter_Season = as.numeric(Winter_Season)) %>%
+  ggplot(aes(x = Winter_Season, y = DIN.DIP)) +
+  geom_point(aes(color = Station), size = 2, alpha = 0.6) +  # Punkter med olika färger för stationer
+  geom_smooth(method = "lm", se = TRUE, color = "black") +  # Linjär regression
+  facet_wrap(~ Basin + Location, scales = "free", ncol = 3) +  # Facettera efter plats och bassäng
+  scale_y_log10() +
+  geom_hline(aes(yintercept = 16, linetype = "Redfield Ratio"), color = "red") +  # Add horizontal line at y = 16
+  labs(
+    title = "DIN:DIP - Seasonal winter averages (0-10m depth)",
+    x = "Winter Season (December-March)",
+    y = "DIN:DIP",
+    color = "Station"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 10, face = "bold")
+  )
+
+```
+
+Linear regression - Per station
+
+The figure below is arranged according to the previous station order that is divided according to basin and location.
+
+```{r, linear_fig, fig.width=10, fig.height=10}
+#| label: fig-linear_station
+#| fig-cap: DIN:DIP per station and linear regression with corresponding equation. Average and standard deviation calculated for each station. The red dashed line indicate the Redfield Ratio, where DIN:DIP is 16.
+
+# Beräkna medelvärde och standardavvikelse för varje station och Winter_Season
+plot_data_with_sd <- depth_averages_combined %>%
+  filter(!is.na(DIN.DIP)) %>%
+  group_by(Location, Basin, Station, Winter_Season) %>%
+  summarise(
+    mean_value = mean(DIN.DIP, na.rm = TRUE),
+    sd_value = sd(DIN.DIP, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+    Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea"))
+  )
+
+# Anpassa linjära modeller per facet
+lm_results <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIN.DIP) & DIN.DIP > 0) %>%  # Ta bort NaN och noll/negativa värden för log-transformering
+  group_by(Location, Basin) %>%
+  do({
+    model <- lm(DIN.DIP ~ Winter_Season, data = .)  # Anpassa linjär regression
+    tidy(model) %>%  # Extrahera modellresultat
+      mutate(formula_text = paste0("y = ", signif(coef(model)[1], 3), " ", signif(coef(model)[2], 3), "x")) %>%
+      filter(term == "Winter_Season")  # Filtrera ut rad för p-värdet
+  }) %>%
+  select(Location, Basin, formula_text, p_value = p.value)
+
+# Skapa plott med standardavvikelse och linjär regression
+combined_plot_linear_per_station <- plot_data_with_sd %>%
+    mutate(Winter_Season = as.numeric(Winter_Season)) %>%
+    mutate(Station = factor(Station, levels = c("RA2", 
+                                              
+                                               "P1", 
+                                               "P LAV4", 
+                                               "Raahen ed RE15",
+                                              
+                                               "A5",
+                                               "A13",
+                                              
+                                               "B3", 
+                                               "B7", 
+                                               "GA1", 
+                                               "Gårdsfjärden", 
+                                               "Söderhamnsfjärden", 
+                                               "Ljusnefjärden", 
+                                               "Östhammar", 
+                                              
+                                              "Vav-11 V-4", 
+                                               "Vav-10 V-3",
+                                               "Tallvarpen", 
+                                               "Raum 385", 
+                                               "Raum 395",
+                                              
+                                               "C1",
+                                               "C3",
+                                               "C14",
+                                               "C24/SR3"))) %>%
+  ggplot(aes(x = Winter_Season, y = mean_value)) +
+  geom_point(aes(color = Station), size = 2, alpha = 0.6) +  # Punkter med färger för stationer
+  geom_errorbar(aes(ymin = mean_value - sd_value, ymax = mean_value + sd_value, color = Station),
+                width = 0.2, alpha = 0.6) +  # Felstaplar för SD
+  geom_smooth(method = "lm", se = TRUE, color = "black", size = 0.25) +  # Linjär regression
+  geom_text(data = lm_results, aes(x = Inf, y = Inf, label = paste0(formula_text, "\np = ", signif(p_value, 3))),
+            hjust = 1.1, vjust = 1.2, inherit.aes = FALSE, size = 3) +  # Formel och p-värde
+  geom_hline(aes(yintercept = 16, linetype = "Redfield Ratio"), color = "red") +  # Add horizontal line at y = 16
+  scale_linetype_manual(
+    name = "DIN:DIP = 16",  # Namn på legendkategorin
+    values = c("Redfield Ratio" = "dashed")  # Dashad line for Redfield Ratio
+  ) +
+  facet_wrap(~ Basin + Location, scales = "free", ncol = 3) +  # Facettera efter plats och bassäng
+ # scale_y_log10() +
+  labs(
+    title = "DIN:DIP - Seasonal winter averages (0-10m depth) - per station \n",
+    x = "\nWinter Season (December-March)",
+    y = "DIN:DIP",
+    color = "Station"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    strip.text = element_text(size = 10, face = "bold")
+  )
+
+```
+
+## Linear Regression - Per Location
+
+Final plot for the reviewed manuscript.
+
+```{r, linear_fig_sum, fig.width=10, fig.height=10}
+#| label: fig-linear_location
+#| fig-cap: DIN:DIP with Linear Regression - Average and standard error calculated for each combination of Basin and Location. 
+
+# Steg 1: Beräkna standardavvikelse och linjära modeller
+summary_data <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIN.DIP) & DIN.DIP > 0) %>%  # Ta bort NaN och noll/negativa värden för log-transformering
+  group_by(Location, Basin, Winter_Season) %>%
+  reframe(  # Byt till reframe för att hantera flera stationer korrekt
+    mean_value = mean(DIN.DIP, na.rm = TRUE),
+    sd_value = sd(DIN.DIP, na.rm = TRUE),
+    se_value = sd(DIN.DIP, na.rm = TRUE) / sqrt(n()), #Standard error instead of standard deviation
+    Station = unique(Station)  # Bevara stationer för färger
+  )
+
+# Steg 2: Anpassa linjära modeller per facet
+lm_results <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIN.DIP) & DIN.DIP > 0) %>%  # Ta bort NaN och noll/negativa värden för log-transformering
+  group_by(Location, Basin) %>%
+  do({
+    model <- lm(DIN.DIP ~ Winter_Season, data = .)  # Anpassa linjär regression
+    tidy(model) %>%  # Extrahera modellresultat
+      mutate(formula_text = paste0("y = ", signif(coef(model)[1], 3), " ", signif(coef(model)[2], 3), "x")) %>%
+      filter(term == "Winter_Season")  # Filtrera ut rad för p-värdet
+  }) %>%
+  select(Location, Basin, formula_text, p_value = p.value)
+
+# Lägg till linetype baserat på p-värde
+lm_results <- lm_results %>%
+  mutate(    p_value_num = round(as.numeric(p_value), 100),   #gör numerisk, antal värdesiffror
+linetype_group = ifelse(p_value_num < 0.05, "p < 0.05", "p > 0.05"))
+
+# Steg 3: Kombinera data med modellresultat
+plot_data <- left_join(summary_data, lm_results, by = c("Location", "Basin"))
+
+# Steg 4: Skapa plotten med linjär regression och standardavvikelse
+combined_plot_location <- plot_data %>%
+  mutate(Basin_Location = paste(Basin, Location, sep = ", ")) %>%
+  mutate(Basin_Location = factor(Basin_Location, levels = c("Bothnian Bay, Swedish Coast", 
+                                                            "Bothnian Sea, Swedish Coast", 
+                                                            "Bothnian Bay, Finnish Coast", 
+                                                            "Bothnian Sea, Finnish Coast", 
+                                                            "Bothnian Bay, Offshore", 
+                                                            "Bothnian Sea, Offshore"))) %>%
+  mutate(ylim_max = ifelse(Basin_Location == "Bothnian Bay, Offshore", 1000, 400)) %>%  # Y-lim för varje panel
+  ggplot(aes(x = Winter_Season, y = mean_value)) +
+  geom_errorbar(aes(ymin = mean_value - se_value, ymax = mean_value + se_value, color = Basin_Location), width = 0.5, alpha = 0.6) +  # Felstaplar för SD
+  geom_point(aes(color = Basin_Location), size = 2, alpha = 0.6) +  # Punkter med färg per station
+  #geom_smooth(method = "lm", se = TRUE, color = "black", size = 0.25) +  # Linjär regression
+geom_smooth(data = plot_data,
+            aes(linetype = linetype_group),
+            method = "lm", se = TRUE, color = "black", size = 0.25) +
+  #facet_wrap(~ Basin + Location, scales = "free", ncol = 3) +  # Facettera efter plats och bassäng
+  facet_grid(Basin ~ Location, scales = "free") + 
+  #scale_y_log10() +  # Log-transformera y-axeln
+  geom_text(data = lm_results, aes(x = Inf, y = Inf, label = paste0(formula_text)),# "\np = ", signif(p_value, 3))),
+            hjust = 1.1, vjust = 1.2, inherit.aes = FALSE, size = 3) +  # Formel och p-värde
+  geom_hline(aes(yintercept = 16, linetype = "Redfield Ratio (DIN:DIP = 16)"), color = "red") +  # Add horizontal line at y = 16
+  scale_linetype_manual(
+  name = "Line types",
+  values = c(
+    #"p > 0.05" = "dashed",
+    "p < 0.05" = "solid",
+    "Redfield Ratio (DIN:DIP = 16)" = "dashed"
+  )) +
+  scale_colour_manual(values = c(
+  "Bothnian Bay, Swedish Coast" = "#E41A1C",  # Orangeröd
+  "Bothnian Bay, Finnish Coast" = "#FF7F00",  # Gulorange
+  "Bothnian Bay, Offshore"      = "#4DAF4A",  # Grön
+  "Bothnian Sea, Swedish Coast" = "#377EB8",  # Blå
+  "Bothnian Sea, Finnish Coast" = "#984EA3",  # Lila
+  "Bothnian Sea, Offshore"      = "#F781BF"   # Rosa
+  )) +
+  labs(
+    title = "", #"DIN:DIP - Seasonal winter averages (0-10m depth) - per Location \n",
+    x = "", # "\nWinter Season (December-March)",
+    y = "DIN:DIP",
+    color = "Basin and Location",
+    linetype = "Line types"
+  ) +
+  guides(
+  color = guide_legend(order = 1),
+  linetype = guide_legend(order = 2)
+) +
+  theme_minimal() +
+    theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    legend.box = "vertical",  # staplar legender vertikalt
+    strip.text = element_text(size = 10, face = "bold")
+  )  ; combined_plot_location
+
+
+
+```
+
+# Figures DIN
+
+## Per Station
+
+Only plot solid lines when p\<0.05 for linear regression and Mann-Kendall. Mann-Kendall was made separately in excel.
+
+```{r, din_station, fig.width=10, fig.height=10}
+#| label: fig-din_station
+#| fig-cap: DIN per Station
+
+# Beräkna medelvärde och standardavvikelse för varje station och Winter_Season
+plot_data_with_sd <- depth_averages_combined %>%
+  filter(!is.na(DIN_uM)) %>%
+  group_by(Location, Basin, Station, Winter_Season) %>%
+  summarise(
+    mean_value = mean(DIN_uM, na.rm = TRUE),
+    sd_value = sd(DIN_uM, na.rm = TRUE),
+    se_value = sd(DIN_uM, na.rm = TRUE) / sqrt(n()), #Standard error instead of standard deviation
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+    Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea"))
+  )
+
+# Anpassa linjära modeller per facet
+lm_results <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIN_uM) & DIN_uM > 0) %>%  # Ta bort NaN och noll/negativa värden för log-transformering
+  group_by(Location, Basin) %>%
+  do({
+    model <- lm(DIN_uM ~ Winter_Season, data = .)  # Anpassa linjär regression
+    tidy(model) %>%  # Extrahera modellresultat
+      mutate(formula_text = paste0("y = ", signif(coef(model)[1], 3), " + ", signif(coef(model)[2], 3), "x") )     %>%
+      filter(term == "Winter_Season")  # Filtrera ut rad för p-värdet
+  }) %>%
+  select(Location, Basin, formula_text, p_value = p.value) %>%
+  #Ad information about Stations to use in each facet 
+  mutate(
+    Station_text = case_when(
+      Basin == "Bothnian Bay" & Location == "Swedish Coast" ~
+        "Stations: RA2\n",
+      Basin == "Bothnian Bay" & Location == "Finnish Coast" ~
+        "Stations: P1 · P LAV4 · Raahen ed RE15\n",
+      Basin == "Bothnian Bay" & Location == "Offshore" ~
+        "Stations: A5 · A13\n",
+      Basin == "Bothnian Sea" & Location == "Swedish Coast" ~
+        "Stations: B3 · B7 · GA1 · Gårdsfjärden · \n Söderhamnsfjärden · Ljusnefjärden · Östhammar\n",
+      Basin == "Bothnian Sea" & Location == "Finnish Coast" ~
+        "Stations: Vav-11 V-4 · Vav-10 V-3 ·\n Tallvarpen · Raum 385 · Raum 395\n",
+      Basin == "Bothnian Sea" & Location == "Offshore" ~
+        "Stations: C3 · C1 · C14 · C24/SR3\n",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Lägg till linetype baserat på p-värde
+lm_results <- lm_results %>%
+  mutate(    p_value_num = round(as.numeric(p_value), 100),   #gör numerisk, antal värdesiffror
+linetype_group = ifelse(p_value_num < 0.05, "p < 0.05", "p > 0.05")) %>%
+ #Change p-value where not coherent with Mann-Kendall test
+    mutate(
+    linetype_group = ifelse(
+      Location == "Finnish Coast" &
+      Basin == "Bothnian Bay",
+      "p > 0.05", linetype_group )) 
+
+#Find color hex codes for colors
+#library(scales)
+#show_col(hue_pal(direction=-1)(22))
+colors <- c( 
+  "RA2" = "#F8766D", #RA2
+ "P1" = "#EC8239", #P1
+ "P LAV4" = "#DB8E00", #P LAV
+ "Raahen ed RE15" =   "#C79800", #Raah
+ "A5" = "#AEA200", #A5
+"A13" =  "#8FAA00", #A13
+"B3" =  "#64B200", #B3
+"B7" =  "#00B81B", #B7
+"GA1" =  "#00BD5C", #GA1
+"Gårdsfjärden" =  "#00C085", #Gårdsfj
+"Söderhamnsfjärden" =  "#00C1A7", #Söderhamnsfj
+"Ljusnefjärden" =  "#00BFC4", #Ljusnefj
+"Östhammar" =  "#00BADE", # Östhammar
+"Vav-11 V-4" =  "#00B2F3", #Vav-11 V-4
+"Vav-10 V-3" =  "#00A6FF", #Vav-10 V-3
+"Tallvarpen" =  "#7B96FF", #Tallvarpen
+"Raum 385" =  "#B385FF", #Raum 385
+"Raum 395" =  "#D874FD", #Raum 395
+"C3" =  "#EF67EB", #C3
+"C1" =  "#FD61D3", #C1
+"C14" =  "#FF63B6", #C14
+"C24/SR3" =  "#FF6B94" #C24
+  )
+
+
+combined_plot_din_station <- plot_data_with_sd %>%
+    mutate(Winter_Season = as.numeric(Winter_Season)) %>%
+  left_join(lm_results %>% select(Location, Basin, linetype_group),
+            by = c("Location", "Basin")) %>%
+    mutate(Station = factor(Station, levels = c("RA2", 
+                                               "P1", 
+                                               "P LAV4", 
+                                               "A5",
+                                               "A13",
+                                               "Raahen ed RE15",
+                                               "B3", 
+                                               "B7", 
+                                               "Vav-11 V-4", 
+                                               "Vav-10 V-3",
+                                               "GA1", 
+                                               "C3",
+                                               "C1",
+                                               "Tallvarpen", 
+                                               "C14",
+                                               "Gårdsfjärden", 
+                                               "Söderhamnsfjärden", 
+                                               "Ljusnefjärden", 
+                                               "C24/SR3",
+                                               "Raum 385", 
+                                               "Raum 395",
+                                               "Östhammar"))) %>%
+  ggplot(aes(x = Winter_Season, y = mean_value)) +
+  geom_point(aes(color = Station), size = 2, alpha = 0.6) +  # Punkter med färger för stationer
+ scale_color_manual(values = colors) +
+  geom_errorbar(aes(ymin = mean_value - se_value, ymax = mean_value + se_value, color = Station),
+                width = 0.2, alpha = 0.6) +  # Felstaplar för SD
+  # CI for all panels
+geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = NA,
+    fill = "grey70") +
+  #Only plot solid lines when p<0.05 for linear regression AND Mann-Kendall
+geom_smooth(
+  data = ~ dplyr::filter(.x, linetype_group == "p < 0.05"),
+  method = "lm",
+  se = TRUE,
+  color = "black",
+  size = 0.25) +
+  #For label p<0.05
+  scale_linetype_manual( name = "Line types", values = c(#"p > 0.05" = "dashed", 
+                                                         "p < 0.05" = "solid" )) +
+  #facet_wrap(~ Basin + Location, scales = "free", ncol = 3) +  # Facettera efter plats och bassäng
+  facet_grid(Basin ~ Location, scales = "free") +
+  #scale_y_log10() +  # Log-transformera y-axeln
+  geom_text(data = lm_results, 
+            aes(x = Inf, y = Inf, 
+            label = paste0(formula_text)),# "\np = ", signif(p_value_num, 3))),
+            hjust = 1.1,
+            vjust = 1.2, 
+            inherit.aes = FALSE, size = 3) +  # Formel och p-värde
+  labs(
+    title = "",
+    x = "",
+    y = "DIN (µM)",
+    color = "Station",
+    linetype = "Line types"
+  ) +
+  guides(
+  color = guide_legend(order = 1),
+  linetype = guide_legend(order = 2)
+) +
+  theme_minimal() +
+    theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    legend.box = "vertical",  # staplar legender vertikalt
+    strip.text = element_text(size = 10, face = "bold")
+  ) ; combined_plot_din_station 
+```
+
+## Per Location
+
+```{r, din_location, fig.width=10, fig.height=7}
+#| label: fig-din_location
+#| fig-cap: DIN per Location
+
+# Steg 1: Beräkna standardavvikelse och linjära modeller för DIN
+summary_data <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIN_uM) & DIN_uM > 0) %>%  # Ta bort NaN och noll/negativa värden
+  group_by(Location, Basin, Winter_Season) %>%
+  reframe(  # Byt till reframe för att hantera flera stationer korrekt
+    mean_value = mean(DIN_uM, na.rm = TRUE),
+    sd_value = sd(DIN_uM, na.rm = TRUE),
+    se_value = sd(DIN_uM, na.rm = TRUE) / sqrt(n()), #Standard error instead of standard deviation
+    Station = unique(Station)  # Bevara stationer för färger
+  )
+
+# Steg 2: Anpassa linjära modeller per facet för DIN
+lm_results <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIN_uM) & DIN_uM > 0) %>%  # Ta bort NaN och noll/negativa värden
+  group_by(Location, Basin) %>%
+  do({
+    model <- lm(DIN_uM ~ Winter_Season, data = .)  # Anpassa linjär regression
+    tidy(model) %>%  # Extrahera modellresultat
+      mutate(formula_text = paste0("y = ", signif(coef(model)[1], 3), " + ", signif(coef(model)[2], 3), "x")) %>%
+      filter(term == "Winter_Season")  # Filtrera ut rad för p-värdet
+  }) %>%
+  select(Location, Basin, formula_text, p_value = p.value)
+
+# Lägg till linetype baserat på p-värde
+lm_results <- lm_results %>%
+  mutate(    p_value_num = round(as.numeric(p_value), 10),   #gör numerisk, tio värdesiffror
+linetype_group = ifelse(p_value_num < 0.05, "p < 0.05", "p > 0.05"))
+
+# Steg 3: Kombinera data med modellresultat
+plot_data <- left_join(summary_data, lm_results, by = c("Location", "Basin"))
+
+# Steg 4: Skapa plotten med linjär regression och standardavvikelse för DIN
+combined_plot_din_location <- plot_data %>%
+  mutate(Basin_Location = paste(Basin, Location, sep = ", ")) %>%
+  mutate(Basin_Location = factor(Basin_Location, levels = c("Bothnian Bay, Swedish Coast", 
+                                                            "Bothnian Sea, Swedish Coast", 
+                                                            "Bothnian Bay, Finnish Coast", 
+                                                            "Bothnian Sea, Finnish Coast", 
+                                                            "Bothnian Bay, Offshore", 
+                                                            "Bothnian Sea, Offshore"))) %>%
+  mutate(ylim_max = ifelse(Basin_Location == "Bothnian Bay, Offshore", 1000, 400)) %>%  # Y-lim för varje panel
+  ggplot(aes(x = Winter_Season, y = mean_value)) +
+  geom_errorbar(aes(ymin = mean_value - se_value, ymax = mean_value + se_value, color = Basin_Location), width = 0.5, alpha = 0.6) +  # Felstaplar för SD
+  geom_point(aes(color = Basin_Location), size = 2, alpha = 0.6) +  # Punkter med färg per station
+  geom_smooth(aes(linetype = linetype_group),
+            method = "lm", se = TRUE, color = "black", size = 0.25) +
+  #facet_wrap(~ Basin + Location, scales = "free", ncol = 3) +  # Facettera efter plats och bassäng
+  facet_grid(Basin ~ Location, scales = "free") +
+  #scale_y_log10() +  # Log-transformera y-axeln
+  geom_text(data = lm_results, aes(x = Inf, y = Inf, 
+                                   label = paste0(formula_text)), 
+                                   #"\np = ", signif(p_value, 3))),
+                                   hjust = 1.1, vjust = 1.2, 
+                                   inherit.aes = FALSE, size = 3) +  # Formel och p-värde
+  scale_linetype_manual(
+  name = "Line types",
+  values = c(
+    #"p > 0.05" = "dashed",
+    "p < 0.05" = "solid"
+  )) +
+  scale_colour_manual(values = c(
+  "Bothnian Bay, Swedish Coast" = "#E41A1C",  # Orangeröd
+  "Bothnian Bay, Finnish Coast" = "#FF7F00",  # Gulorange
+  "Bothnian Bay, Offshore"      = "#4DAF4A",  # Grön
+  "Bothnian Sea, Swedish Coast" = "#377EB8",  # Blå
+  "Bothnian Sea, Finnish Coast" = "#984EA3",  # Lila
+  "Bothnian Sea, Offshore"      = "#F781BF"   # Rosa
+  )) +
+  labs(
+    title = "",
+    x = "",
+    y = "DIN (µM)",
+    color = "Basin and Location",
+    linetype = "Line types"
+  ) +
+  guides(
+  color = guide_legend(order = 1),
+  linetype = guide_legend(order = 2)
+) +
+  theme_minimal() +
+    theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    legend.box = "vertical",  # staplar legender vertikalt
+    strip.text = element_text(size = 10, face = "bold")
+  ) 
+
+
+```
+
+# Figures DIP
+
+## Per Station
+
+```{r, dip, fig.width=10, fig.height=10}
+#| label: fig-dip_station
+#| fig-cap: DIP per Station
+
+# Beräkna medelvärde och standardavvikelse för varje station och Winter_Season
+plot_data_with_sd <- depth_averages_combined %>%
+  filter(!is.na(DIP_uM)) %>%
+  group_by(Location, Basin, Station, Winter_Season) %>%
+  summarise(
+    mean_value = mean(DIP_uM, na.rm = TRUE),
+    sd_value = sd(DIP_uM, na.rm = TRUE),
+    se_value = sd(DIP_uM, na.rm = TRUE) / sqrt(n()), #Standard error instead of standard deviation
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+    Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea"))
+  )
+
+# Anpassa linjära modeller per facet
+lm_results <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIP_uM) & DIP_uM > 0) %>%  # Ta bort NaN och noll/negativa värden för log-transformering
+  group_by(Location, Basin) %>%
+  do({
+    model <- lm(DIP_uM ~ Winter_Season, data = .)  # Anpassa linjär regression
+    tidy(model) %>%  # Extrahera modellresultat
+      mutate(formula_text = paste0("y = ", signif(coef(model)[1], 3), " + ", signif(coef(model)[2], 3), "x")) %>%
+      filter(term == "Winter_Season")  # Filtrera ut rad för p-värdet
+  }) %>%
+  select(Location, Basin, formula_text, p_value = p.value)%>%
+  #Ad information about Stations to use in each facet 
+  mutate(
+    Station_text = case_when(
+      Basin == "Bothnian Bay" & Location == "Swedish Coast" ~
+        "Stations: RA2\n",
+      Basin == "Bothnian Bay" & Location == "Finnish Coast" ~
+        "Stations: P1 · P LAV4 · Raahen ed RE15\n",
+      Basin == "Bothnian Bay" & Location == "Offshore" ~
+        "Stations: A5 · A13\n",
+      Basin == "Bothnian Sea" & Location == "Swedish Coast" ~
+        "Stations: B3 · B7 · GA1 · Gårdsfjärden · \n Söderhamnsfjärden · Ljusnefjärden · Östhammar\n",
+      Basin == "Bothnian Sea" & Location == "Finnish Coast" ~
+        "Stations: Vav-11 V-4 · Vav-10 V-3 ·\n Tallvarpen · Raum 385 · Raum 395\n",
+      Basin == "Bothnian Sea" & Location == "Offshore" ~
+        "Stations: C3 · C1 · C14 · C24/SR3\n",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Lägg till linetype baserat på p-värde
+lm_results <- lm_results %>%
+  mutate(    p_value_num = round(as.numeric(p_value), 100),   #gör numerisk, antal värdesiffror
+linetype_group = ifelse(p_value_num < 0.05, "p < 0.05", "p > 0.05"))
+
+#Find color hex codes for colors
+#library(scales)
+#show_col(hue_pal(direction=-1)(22))
+colors <- c( 
+  "RA2" = "#F8766D", #RA2
+ "P1" = "#EC8239", #P1
+ "P LAV4" = "#DB8E00", #P LAV
+ "Raahen ed RE15" =   "#C79800", #Raah
+ "A5" = "#AEA200", #A5
+"A13" =  "#8FAA00", #A13
+"B3" =  "#64B200", #B3
+"B7" =  "#00B81B", #B7
+"GA1" =  "#00BD5C", #GA1
+"Gårdsfjärden" =  "#00C085", #Gårdsfj
+"Söderhamnsfjärden" =  "#00C1A7", #Söderhamnsfj
+"Ljusnefjärden" =  "#00BFC4", #Ljusnefj
+"Östhammar" =  "#00BADE", # Östhammar
+"Vav-11 V-4" =  "#00B2F3", #Vav-11 V-4
+"Vav-10 V-3" =  "#00A6FF", #Vav-10 V-3
+"Tallvarpen" =  "#7B96FF", #Tallvarpen
+"Raum 385" =  "#B385FF", #Raum 385
+"Raum 395" =  "#D874FD", #Raum 395
+"C3" =  "#EF67EB", #C3
+"C1" =  "#FD61D3", #C1
+"C14" =  "#FF63B6", #C14
+"C24/SR3" =  "#FF6B94" #C24
+  )
+
+# Skapa plott med standardavvikelse och linjär regression
+combined_plot_dip_station <- plot_data_with_sd %>%
+    mutate(Winter_Season = as.numeric(Winter_Season)) %>%
+    left_join(lm_results %>% select(Location, Basin, linetype_group),
+            by = c("Location", "Basin")) %>%
+    mutate(Station = factor(Station, levels = c("RA2", 
+                                               "P1", 
+                                               "P LAV4", 
+                                               "A5",
+                                               "A13",
+                                               "Raahen ed RE15",
+                                               "B3", 
+                                               "B7", 
+                                               "Vav-11 V-4", 
+                                               "Vav-10 V-3",
+                                               "GA1", 
+                                               "C3",
+                                               "C1",
+                                               "Tallvarpen", 
+                                               "C14",
+                                               "Gårdsfjärden", 
+                                               "Söderhamnsfjärden", 
+                                               "Ljusnefjärden", 
+                                               "C24/SR3",
+                                               "Raum 385", 
+                                               "Raum 395",
+                                               "Östhammar"))) %>%
+  ggplot(aes(x = Winter_Season, y = mean_value)) +
+  geom_point(aes(color = Station), size = 2, alpha = 0.6) +  # Punkter med färger för stationer
+  scale_color_manual(values = colors) +
+  geom_errorbar(aes(ymin = mean_value - se_value, ymax = mean_value + se_value, color = Station),
+                width = 0.2, alpha = 0.6) +  # Felstaplar för SD
+ geom_smooth(aes(linetype = linetype_group),
+            method = "lm", se = TRUE, color = "black", size = 0.25) +
+  #facet_wrap(~ Basin + Location, scales = "free", ncol = 3) +  # Facettera efter plats och bassäng
+  facet_grid(Basin ~ Location, scales = "free") +
+  #scale_y_log10() +  # Log-transformera y-axeln
+  geom_text(data = lm_results, aes(x = Inf, y = Inf, 
+                                   label = paste0(formula_text)),# "\np = ", signif(p_value_num, 3))),
+            hjust = 1.1, vjust = 1.2, inherit.aes = FALSE, size = 3) +  # Formel och p-värde
+  scale_linetype_manual(
+  name = "Line types",
+  values = c(
+    #"p > 0.05" = "dashed",
+    "p < 0.05" = "solid"
+  )) +
+  labs(
+    title = "",
+    x = "",
+    y = "DIP (µM)",
+    color = "Station",
+    linetype = "Line types"
+  ) +
+  guides(
+  color = guide_legend(order = 1),
+  linetype = guide_legend(order = 2)
+) +
+  theme_minimal() +
+    theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    legend.box = "vertical",  # staplar legender vertikalt
+    strip.text = element_text(size = 10, face = "bold")
+  ) ;combined_plot_dip_station 
+```
+
+## Per Location
+
+```{r, dip_location, fig.width=10, fig.height=7}
+#| label: fig-dip_location
+#| fig-cap: Figure of DIP per Location
+
+# Steg 1: Beräkna standardavvikelse och linjära modeller för DIP
+summary_data <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIP_uM) & DIP_uM > 0) %>%  # Ta bort NaN och noll/negativa värden
+  group_by(Location, Basin, Winter_Season) %>%
+  reframe(  # Byt till reframe för att hantera flera stationer korrekt
+    mean_value = mean(DIP_uM, na.rm = TRUE),
+    sd_value = sd(DIP_uM, na.rm = TRUE),
+    se_value = sd(DIP_uM, na.rm = TRUE) / sqrt(n()), #Standard error instead of standard deviation
+    Station = unique(Station)  # Bevara stationer för färger
+  )
+
+# Steg 2: Anpassa linjära modeller per facet för DIP
+lm_results <- depth_averages_combined %>%
+  mutate(Location = factor(Location, levels = c("Swedish Coast", "Finnish Coast", "Offshore")),
+         Basin = factor(Basin, levels = c("Bothnian Bay", "Bothnian Sea")),
+         Winter_Season = as.numeric(Winter_Season)) %>%
+  filter(!is.na(DIP_uM) & DIP_uM > 0) %>%  # Ta bort NaN och noll/negativa värden
+  group_by(Location, Basin) %>%
+  do({
+    model <- lm(DIP_uM ~ Winter_Season, data = .)  # Anpassa linjär regression
+    tidy(model) %>%  # Extrahera modellresultat
+      mutate(formula_text = paste0("y = ", signif(coef(model)[1], 3), " ", signif(coef(model)[2], 3), "x")) %>%
+      filter(term == "Winter_Season")  # Filtrera ut rad för p-värdet
+  }) %>%
+  select(Location, Basin, formula_text, p_value = p.value)
+
+# Steg 3: Kombinera data med modellresultat
+plot_data <- left_join(summary_data, lm_results, by = c("Location", "Basin"))
+
+# Steg 4: Skapa plotten med linjär regression och standardavvikelse för DIP
+combined_plot_dip_location <- plot_data %>%
+  mutate(Basin_Location = paste(Basin, Location, sep = ", ")) %>%
+  mutate(Basin_Location = factor(Basin_Location, levels = c("Bothnian Bay, Swedish Coast", 
+                                                            "Bothnian Sea, Swedish Coast", 
+                                                            "Bothnian Bay, Finnish Coast", 
+                                                            "Bothnian Sea, Finnish Coast", 
+                                                            "Bothnian Bay, Offshore", 
+                                                            "Bothnian Sea, Offshore"))) %>%
+  mutate(ylim_max = ifelse(Basin_Location == "Bothnian Bay, Offshore", 1000, 400)) %>%  # Y-lim för varje panel
+  ggplot(aes(x = Winter_Season, y = mean_value)) +
+  geom_errorbar(aes(ymin = mean_value - se_value, ymax = mean_value + se_value, color = Basin_Location), width = 0.5, alpha = 0.6) +  # Felstaplar för SD
+  geom_point(aes(color = Basin_Location), size = 2, alpha = 0.6) +  # Punkter med färg per station
+  geom_smooth(method = "lm", se = TRUE, color = "black", size = 0.25) +  # Linjär regression
+  facet_wrap(~ Basin + Location,  ncol = 3) +  # Facettera efter plats och bassäng #scales = "free",
+  # scale_y_log10() +  # Log-transformera y-axeln (kommenterad bort om ej behövs)
+  geom_text(data = lm_results, aes(x = Inf, y = Inf, label = paste0(formula_text)),# "\np = ", signif(p_value, 3))),
+            hjust = 1.1, vjust = 1.2, inherit.aes = FALSE, size = 3) +  # Formel och p-värde
+  scale_colour_manual(values = c(
+  "Bothnian Bay, Swedish Coast" = "#E41A1C",  # Orangeröd
+  "Bothnian Bay, Finnish Coast" = "#FF7F00",  # Gulorange
+  "Bothnian Bay, Offshore"      = "#4DAF4A",  # Grön
+  "Bothnian Sea, Swedish Coast" = "#377EB8",  # Blå
+  "Bothnian Sea, Finnish Coast" = "#984EA3",  # Lila
+  "Bothnian Sea, Offshore"      = "#F781BF"   # Rosa
+  )) +
+  labs(
+    title = "DIP - Seasonal winter averages (0-10m depth) - per Location \n",
+    x = "\nWinter Season (December-March)",
+    y = "DIP (µM)",
+    color = "Basin and Location"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    strip.text = element_text(size = 10, face = "bold")
+  ) 
+
+
+```
+
+# Figure - DIN and DIP together
+
+The final figure legend in the published paper has been modified in Inkscape.
+
+## Per Station
+
+```{r, patchwork_DIN_DIP_station, fig.width=10, fig.height=14}
+#| label: fig-DIN_and_DIP_station
+#| fig-cap: DIN and DIP per station together, with A and B panel. The final figure legend in the published paper has been modified in Inkscape.
+
+library(patchwork)
+library(cowplot)
+
+#Remove the legend for DIN
+combined_plot_din_station <- combined_plot_din_station  + theme(legend.position = "none") 
+                                                                
+din_and_dip_station <- 
+  ( combined_plot_din_station  / combined_plot_dip_station ) +  
+    plot_annotation(
+    tag_levels = "A",  # Lägg till A och B automatiskt
+    theme = theme(plot.title = element_text(hjust = 0.5),
+                      plot.tag = element_text(size = 30))   ); din_and_dip_station
+
+
+```
+
+## Per Location
+
+```{r, patchwork_DIN_DIP_location, fig.width=10, fig.height=12}
+#| label: fig-DIN_and_DIP_location
+#| fig-cap: DIN and DIP per location together, with A and B panel.
+
+library(patchwork)
+library(cowplot)
+
+#Remove the legend for DIN
+combined_plot_din_location <- combined_plot_din_location  + theme(legend.position = "none") 
+                                                                
+din_and_dip_location <- 
+  ( combined_plot_din_location  / combined_plot_dip_location ) +  
+    plot_annotation(
+    tag_levels = "A",  # Lägg till A och B automatiskt
+    theme = theme(plot.title = element_text(hjust = 0.5),
+                      plot.tag = element_text(size = 30))   )
+```
+
+# Limiting nutrient
+
+Proportions of the state of limiting nutrient at each station.
+
+## From 1994-2023
+
+```{r, limiting_nutrient, fig.width=5, fig.height=5}
+#| label: fig-limiting_nutrient
+#| fig-cap: Figure of Limiting Nutrient
+
+# Plot Limiting_nutrient by Location
+limiting_nutrient <- depth_averages_combined %>%
+  filter(!is.na(Limiting_nutrient)) %>%
+  mutate(Limiting_nutrient = case_when(
+  DIN.DIP > 20 ~ "P-limited (DIN:DIP > 20)",
+  DIN.DIP >= 12 & DIN.DIP <= 20 ~ "Balanced/Greyzone (12 ≤ DIN:DIP ≤ 20)",
+  DIN.DIP < 12  ~ "N-limited (DIN:DIP < 12)"
+ # DIN.DIP < 12 & DIN.DIP > 6 ~ "N-limited (6 < DIN:DIP < 12)",
+#  DIN.DIP <= 6 ~ "Strongly N-limited (DIN:DIP ≤ 6)"
+)) %>%
+    mutate(Limiting_nutrient = factor(
+    Limiting_nutrient, 
+    levels = c("P-limited (DIN:DIP > 20)", 
+               "Balanced/Greyzone (12 ≤ DIN:DIP ≤ 20)", 
+               "N-limited (DIN:DIP < 12)")
+              # "N-limited (6 < DIN:DIP < 12)", 
+              # "Strongly N-limited (DIN:DIP ≤ 6)")
+  )) %>%
+  # Generate a larger interval to visualize before and after a shift in Limiting_nutrient
+  mutate(Winter_Season = as.numeric(Winter_Season)) %>%  
+  mutate(Interval_big = case_when(
+      between(Winter_Season, 1994, 2002) ~ "1994-2002",
+      between(Winter_Season, 2003, 2023) ~ "2003-2023" )) %>%
+  mutate(Basin_Location = paste(Basin, Location, sep = ", ")) %>%
+  mutate(Basin_Location = factor(Basin_Location, levels = c("Bothnian Bay, Swedish Coast", 
+                                                            "Bothnian Sea, Swedish Coast", 
+                                                            "Bothnian Bay, Finnish Coast", 
+                                                            "Bothnian Sea, Finnish Coast", 
+                                                            "Bothnian Bay, Offshore", 
+                                                            "Bothnian Sea, Offshore"))) %>%
+      mutate(Station = factor(Station, levels = c(
+                                              "RA2", 
+                                               "P1", 
+                                               "P LAV4", 
+                                               "A5",
+                                               "A13",
+                                               "Raahen ed RE15",
+                                               "B3", 
+                                               "B7", 
+                                               "Vav-11 V-4", 
+                                               "Vav-10 V-3",
+                                               "GA1", 
+                                               "C3",
+                                               "C1",
+                                               "Tallvarpen", 
+                                               "C14",
+                                               "Gårdsfjärden", 
+                                               "Söderhamnsfjärden", 
+                                               "Ljusnefjärden", 
+                                               "C24/SR3",
+                                               "Raum 385", 
+                                               "Raum 395",
+                                               "Östhammar"
+                                               ))) %>%
+    ggplot(aes(x = Station, fill = Limiting_nutrient)) +
+    #facet_wrap(~ Interval_big, scales = "free", nrow = 2) +  # Facettera efter plats och bassäng
+   scale_fill_manual(values = c(
+    "P-limited (DIN:DIP > 20)" =  "#6CAED6",
+    "Balanced/Greyzone (12 ≤ DIN:DIP ≤ 20)" = "#8CCB89",
+    "N-limited (DIN:DIP < 12)" = "#FFAC4D"
+   # "N-limited (6 < DIN:DIP < 12)" = "#FFAC4D",
+   # "Strongly N-limited (DIN:DIP ≤ 6)" = "#E68E8E"
+  )) + 
+  facet_wrap(~ Basin ,  ncol = 2, scales = "free_x") + 
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE)) +
+  geom_bar(position = "fill") +
+  labs(x = "Station", y = "Proportion", fill = "Limiting Nutrient",
+      title = "Limiting nutrient for each station, from north to south",) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5)
+        ) 
+
+```
+
+## Comparing 1994-2002 and 2003-2023
+
+```{r, limiting_nutrient_interval, fig.width=5, fig.height=7}
+#| label: fig-limiting_nutrient_interval
+#| fig-cap: Figure of Limiting Nutrient divided into two time intervals, comparing the time period 1994-2002 and 2003-2023.
+
+# Plot Limiting_nutrient by Location
+limiting_nutrient_interval <- depth_averages_combined %>%
+  filter(!is.na(Limiting_nutrient)) %>%
+  mutate(Limiting_nutrient = case_when(
+  DIN.DIP > 20 ~ "P-limited (DIN:DIP > 20)",
+  DIN.DIP >= 12 & DIN.DIP <= 20 ~ "Balanced/Greyzone (12 ≤ DIN:DIP ≤ 20)",
+  DIN.DIP < 12  ~ "N-limited (DIN:DIP < 12)" )) %>%
+    mutate(Limiting_nutrient = factor(
+    Limiting_nutrient, 
+    levels = c("P-limited (DIN:DIP > 20)", 
+               "Balanced/Greyzone (12 ≤ DIN:DIP ≤ 20)", 
+               "N-limited (DIN:DIP < 12)")))  %>%
+  # Generate a larger interval to visualize before and after a shift in Limiting_nutrient
+  mutate(Winter_Season = as.numeric(Winter_Season)) %>%  
+  mutate(Interval_big = case_when(
+      between(Winter_Season, 1994, 2002) ~ "1994-2002",
+      between(Winter_Season, 2003, 2023) ~ "2003-2023" )) %>%
+  mutate(Basin_Location = paste(Basin, Location, sep = ", ")) %>%
+  mutate(Basin_Location = factor(Basin_Location, levels = c("Bothnian Bay, Swedish Coast", 
+                                                            "Bothnian Sea, Swedish Coast", 
+                                                            "Bothnian Bay, Finnish Coast", 
+                                                            "Bothnian Sea, Finnish Coast", 
+                                                            "Bothnian Bay, Offshore", 
+                                                            "Bothnian Sea, Offshore"))) %>%
+      mutate(Station = factor(Station, levels = c("RA2", 
+                                               "P1", 
+                                               "P LAV4", 
+                                               "A5",
+                                               "A13",
+                                               "Raahen ed RE15",
+                                               "B3", 
+                                               "B7", 
+                                               "Vav-11 V-4", 
+                                               "Vav-10 V-3",
+                                               "GA1", 
+                                               "C3",
+                                               "C1",
+                                               "Tallvarpen", 
+                                               "C14",
+                                               "Gårdsfjärden", 
+                                               "Söderhamnsfjärden", 
+                                               "Ljusnefjärden", 
+                                               "C24/SR3",
+                                               "Raum 385", 
+                                               "Raum 395",
+                                               "Östhammar"
+                                               ))) %>%
+    ggplot(aes(x = Station, fill = Limiting_nutrient)) +
+    facet_wrap(~ Interval_big ~ Basin, scales = "free_x", nrow = 2) +  # Facettera efter plats och bassäng   #  facet_wrap(~ Basin ,  ncol = 2, scales = "free_x") + 
+   scale_fill_manual(values = c(
+    "P-limited (DIN:DIP > 20)" =  "#6CAED6",
+    "Balanced/Greyzone (12 ≤ DIN:DIP ≤ 20)" = "#8CCB89",
+    "N-limited (DIN:DIP < 12)" = "#FFAC4D"
+  )) + 
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE)) +
+  geom_bar(position = "fill") +
+  labs(x = "Station (north to south)", y = "Proportion of Limiting nutrient groupings", fill = "Limiting Nutrient",
+      title = "",) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5)) ; limiting_nutrient_interval
+```
+
+# Map - Gulf of Bothnia
+
+```{r, map, fig.width=7, fig.height=7}
+#| label: fig-map
+#| fig-cap: Map of the Gulf of Bothnia
+
+library(ggplot2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggspatial)
+library(ggrepel)
+library(sf)
+
+# Ladda in stationsdata, Lat och Long
+sites_st <- read_excel(paste(path,"Koordinater_c1.xlsx",sep="")) %>%
+  mutate(Namn = case_when(
+          Namn %in% c("C24") ~ "C24/SR3",
+          Namn %in% c("Raum 385 J") ~ "Raum 385",
+          Namn %in% c("Raum 395 R") ~ "Raum 395",
+          TRUE ~ Namn))
+
+#Transect
+sites_tr <- read_excel(paste(path,"Koordinater_transekt.xlsx",sep="")) %>%
+  #Select stations
+  filter( Namn == "A19" |
+          Namn == "A19-S" |
+          Namn == "B5" |
+          Namn == "B5-N" |
+          Namn == "B1-S2" |
+          Namn == "B1-S1" |
+          Namn == "B1" |
+          Namn == "B1-N")
+
+#Join stations and transect coordinates
+sites <- full_join(sites_st, sites_tr, by = c("Namn", "Lat", "Long"))
+
+# Kontrollera och konvertera till sf-objekt
+sites_sf <- st_as_sf(sites_st, coords = c("Long", "Lat"), crs = 4326)  # WGS84 (EPSG:4326)
+sites_sf_tr <- st_as_sf(sites_tr, coords = c("Long", "Lat"), crs = 4326)  # WGS84 (EPSG:4326)
+
+# Stäng av S2
+sf_use_s2(FALSE)
+
+# Ladda världskartan och filtrera Sverige och Finland
+world <- ne_countries(scale = "medium", returnclass = "sf")
+sweden_finland <- world %>%
+  filter(admin %in% c("Sweden", "Finland"))
+
+# Lägg till färg på stationerna baserat på faktorordningen
+sites_sf <- sites_sf %>%
+  mutate(
+    Namn = factor(
+      Namn,
+      levels = c(
+        "RA2", 
+        "P 1", 
+        "P LAV4", 
+        "A5",
+        "A13",
+        "Raahen ed RE15",
+        "B3", 
+        "B7", 
+        "Vav-11 V-4", 
+        "Vav-10 V-3",
+        "GA1", 
+        "C3",
+        "C1",
+        "Tallvarpen", 
+        "C14",
+        "Gårdsfjärden", 
+        "Söderhamnsfjärden", 
+        "Ljusnefjärden", 
+        "C24/SR3",
+        "Raum 385", 
+        "Raum 395", 
+        "Östhammar"
+      )
+    ),
+
+    # Add Basin
+    Basin = case_when(
+      Namn %in% c(
+        "RA2", 
+        "P 1", 
+        "P LAV4", 
+        "A5",
+        "A13",
+        "Raahen ed RE15"
+      ) ~ "Bothnian Bay",
+
+      Namn %in% c(
+        "B3", 
+        "B7", 
+        "Vav-11 V-4", 
+        "Vav-10 V-3",
+        "GA1", 
+        "C3",
+        "C1",
+        "Tallvarpen", 
+        "C14",
+        "Gårdsfjärden", 
+        "Söderhamnsfjärden", 
+        "Ljusnefjärden", 
+        "C24/SR3",
+        "Raum 385", 
+        "Raum 395", 
+        "Östhammar"
+      ) ~ "Bothnian Sea",
+
+      TRUE ~ NA_character_
+    ),
+
+    # Add Location
+    Location = case_when(
+      Namn %in% c(
+        "A5", "A13", "C1", "C3", "C14", "C24/SR3"
+      ) ~ "Offshore",
+
+      Namn %in% c(
+        "RA2", 
+        "B3", 
+        "B7", 
+        "GA1",
+        "Gårdsfjärden", 
+        "Söderhamnsfjärden", 
+        "Ljusnefjärden", 
+        "Östhammar"
+      ) ~ "Swedish coast",
+
+      Namn %in% c(
+        "P 1", 
+        "P LAV4", 
+        "Raahen ed RE15",
+        "Vav-11 V-4", 
+        "Vav-10 V-3",
+        "Tallvarpen", 
+        "Raum 385", 
+        "Raum 395"
+      ) ~ "Finnish coast",
+
+      TRUE ~ NA_character_
+    ),
+
+    # Combine Basin + Location
+    Basin_Location = paste(Basin, Location, sep = ", "),
+
+    # Set desired order
+    Basin_Location = factor(
+      Basin_Location,
+      levels = c(
+        "Bothnian Bay, Swedish coast", 
+        "Bothnian Sea, Swedish coast", 
+        "Bothnian Bay, Finnish coast", 
+        "Bothnian Sea, Finnish coast", 
+        "Bothnian Bay, Offshore", 
+        "Bothnian Sea, Offshore"
+      )
+    ),
+
+    # Combine all three
+    Basin_Location_Station = paste(
+      Basin, Location, Namn, sep = " "
+    )
+  )
+
+
+#Find color hex codes for colors
+#library(scales)
+#show_col(hue_pal(direction=-1)(22))
+colors <- c( 
+  "RA2" = "#F8766D", #RA2
+ "P 1" = "#EC8239", #P1
+ "P LAV4" = "#DB8E00", #P LAV
+ "Raahen ed RE15" =   "#C79800", #Raah
+ "A5" = "#AEA200", #A5
+"A13" =  "#8FAA00", #A13
+"B3" =  "#64B200", #B3
+"B7" =  "#00B81B", #B7
+"GA1" =  "#00BD5C", #GA1
+"Gårdsfjärden" =  "#00C085", #Gårdsfj
+"Söderhamnsfjärden" =  "#00C1A7", #Söderhamnsfj
+"Ljusnefjärden" =  "#00BFC4", #Ljusnefj
+"Östhammar" =  "#00BADE", # Östhammar
+"Vav-11 V-4" =  "#00B2F3", #Vav-11 V-4
+"Vav-10 V-3" =  "#00A6FF", #Vav-10 V-3
+"Tallvarpen" =  "#7B96FF", #Tallvarpen
+"Raum 385" =  "#B385FF", #Raum 385
+"Raum 395" =  "#D874FD", #Raum 395
+"C3" =  "#EF67EB", #C3
+"C1" =  "#FD61D3", #C1
+"C14" =  "#FF63B6", #C14
+"C24/SR3" =  "#FF6B94" #C24
+  )
+
+
+# Kartplotten
+map <- ggplot() +
+  # Sverige och Finland
+  geom_sf(data = sweden_finland, fill = "#F7F2EE", colour = "darkgrey") +
+  # Annoteringar för regionnamn
+  annotate("text", x = 23.3, y = 64.8, label = "Bothnian \nBay", 
+           size = 4, color = "darkgrey", fontface = "italic") +
+  annotate("text", x = 19.5, y = 61.5, label = "Bothnian \nSea", 
+           size = 4, color = "darkgrey", fontface = "italic") +
+    annotate("text", x = 21.75, y = 63.4, label = "Northern \nQuark", 
+           size = 2.1, color = "darkgrey", fontface = "italic") +
+        annotate("text", x = 20.3, y = 60.3, label = "Southern \nQuark", 
+           size = 2.1, color = "darkgrey", fontface = "italic") +
+ # annotate("text", x = 21, y = 63.5, label = "Gulf  of Bothnia", 
+ #         size = 8, color = "grey", fontface = "italic", angle = 55, hjust = 0.5) +
+  annotate("text", x = 18, y = 65, label = "Sweden", 
+           size = 7.5, color = "white") +
+  annotate("text", x = 23.5, y = 62, label = "Finland", 
+           size = 7.5, color = "white") +
+  # Stationspunkter färgade efter Station (använder ggplot's standardfärger)
+  geom_sf(data = sites_sf, aes(fill = Namn), shape = 21, color = "black", size = 3) + 
+  scale_fill_manual(values = colors) +
+  # Transectpunkter
+  geom_sf(data = sites_sf_tr, aes(fill = Namn), shape = 21, color = "black", size = 2, fill = "steelblue") +
+  # Stationspunkter Etiketter med rätt koordinater
+  geom_text_repel(data = sites_sf, aes(geometry = geometry, label = Namn), 
+                  stat = "sf_coordinates", size = 3, color = "black") +
+  # Transect labels
+  geom_text_repel(
+    data = sites_sf_tr,
+    aes(geometry = geometry, label = Namn),
+    stat = "sf_coordinates",
+    size = 1.7,
+    box.padding = 0.15,
+    point.padding = 0.05,
+    force = 0.2,
+    max.overlaps = Inf,
+    seed = 123,
+    segment.color = NA
+    ) + 
+  # Lägg till en skala i hörnet
+  annotation_scale(location = "br", text_cex = 0.6) +
+  # Anpassa koordinatsystemet för Bottniska viken
+  coord_sf(xlim = c(16, 25), ylim = c(59.5, 66.5), expand = FALSE) +
+  # Layout och teman
+  theme_minimal() +
+  labs(title = "", x = "", y = "",  fill = "Stations") + #Map of the Gulf of Bothnia
+  guides(fill = guide_legend(ncol = 1)) +
+  theme(
+    panel.background = element_rect(fill = "#DBE1E3"),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "darkgrey", fill = NA),  # Grå linje runt havskanten
+    plot.title = element_text(hjust = 0.5)
+  )  ; map
+
+```
+
+# Map transect
+
+```{r, map_transect, fig.width=8, fig.height=7}
+#| label: fig-map_transect
+#| fig-cap: Transect in the Northern Quark
+
+library(ggplot2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggspatial)
+library(ggrepel)
+library(sf)
+
+# Ladda in stationsdata, Lat och Long
+sites <- read_excel(paste(path,"Koordinater_transekt.xlsx",sep="")) 
+
+# Kontrollera och konvertera till sf-objekt
+sites_sf <- st_as_sf(sites, coords = c("Long", "Lat"), crs = 4326)  # WGS84 (EPSG:4326)
+
+# Stäng av S2
+sf_use_s2(FALSE)
+
+# Ladda världskartan och filtrera Sverige och Finland
+world <- ne_countries(scale = "medium", returnclass = "sf")
+sweden_finland <- world %>%
+  filter(admin %in% c("Sweden", "Finland"))
+
+
+# Kartplotten
+map_transect <- ggplot() +
+  # Sverige och Finland
+  geom_sf(data = sweden_finland, fill = "#F7F2EE", colour = "darkgrey") +
+  # Stationspunkter färgade efter Station (använder ggplot's standardfärger)
+  geom_sf(data = sites_sf, fill = "steelblue", shape = 21, color = "black", size = 5) +
+  # Etiketter med rätt koordinater
+  geom_text_repel(data = sites_sf, aes(geometry = geometry, label = Namn), 
+                  stat = "sf_coordinates", size = 5, color = "black",
+                  nudge_x = -0.1,      # Nudges labels to the right
+                    nudge_y = 0.1) +
+  # Annoteringar för regionnamn
+  annotate("text", x = 22.3, y = 64.25, label = "Bothnian \nBay", 
+           size = 6, color = "darkgrey", fontface = "italic") +
+  annotate("text", x = 20, y = 62.8, label = "Bothnian \nSea", 
+           size = 6, color = "darkgrey", fontface = "italic") +
+  annotate("text", x = 21.75, y = 63.5, label = "The Northern \nQuark", 
+           size = 5, color = "darkgrey", fontface = "italic") +
+  # Lägg till en skala i hörnet
+  annotation_scale(location = "br", text_cex = 0.6) +
+  # Anpassa koordinatsystemet för Bottniska viken
+  coord_sf(xlim = c(17, 23), ylim = c(62.5, 65), expand = FALSE) +
+  # Layout och teman
+  theme_minimal() +
+  labs(title = "Transect in the Northern Quark", x = "", y = "",  fill = "Station") +
+  guides(fill = guide_legend(ncol = 1)) +
+  theme(
+    panel.background = element_rect(fill = "#DBE1E3"),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "darkgrey", fill = NA),  # Grå linje runt havskanten
+    plot.title = element_text(hjust = 0.5)
+  ); map_transect
+
+
+```
+
+# Save to pdf
+
+```{r, save_pdf}
+
+#Sätt output-path
+output_path <- "/Figures/"
+
+
+ggsave(paste(output_path, "combined_plot_linear_per_station", 
+             ".pdf",sep=""), 
+       plot = combined_plot_linear_per_station , 
+       width = 10, 
+       height = 10, 
+       units = "in")
+
+ggsave(paste(output_path, "combined_plot_location", 
+             ".pdf",sep=""), 
+       plot = combined_plot_location , 
+       width = 10, 
+       height = 7, 
+       units = "in")
+
+ggsave(paste(output_path, "combined_plot_din_station", 
+             ".pdf",sep=""), 
+       plot = combined_plot_din_station , 
+       width = 10, 
+       height = 7, 
+       units = "in")
+
+ggsave(paste(output_path, "combined_plot_din_location", 
+             ".pdf",sep=""), 
+       plot = combined_plot_din_location , 
+       width = 10, 
+       height = 7, 
+       units = "in")
+
+ggsave(paste(output_path, "combined_plot_dip_station", 
+             ".pdf",sep=""), 
+       plot = combined_plot_dip_station , 
+       width = 10, 
+       height = 7, 
+       units = "in")
+
+ggsave(paste(output_path, "combined_plot_dip_location", 
+             ".pdf",sep=""), 
+       plot = combined_plot_dip_location , 
+       width = 10, 
+       height = 7, 
+       units = "in")
+
+ggsave(paste(output_path, "din_and_dip_station", 
+             ".pdf",sep=""), 
+       plot = din_and_dip_station , 
+       width = 10, 
+       height = 12, 
+       units = "in")
+
+ggsave(paste(output_path, "din_and_dip_location", 
+             ".pdf",sep=""), 
+       plot = din_and_dip_location , 
+       width = 10, 
+       height = 12, 
+       units = "in")
+
+ 
+ggsave(paste(output_path, "limiting_nutrient", 
+             ".pdf",sep=""), 
+       plot = limiting_nutrient , 
+       width = 5, 
+       height = 5, 
+       units = "in")
+
+ggsave(paste(output_path, "limiting_nutrient_interval", 
+             ".pdf",sep=""), 
+       plot = limiting_nutrient_interval , 
+       width = 5, 
+       height = 7, 
+       units = "in")
+
+ggsave(paste(output_path, "map", 
+             ".pdf",sep=""), 
+       plot = map , 
+       width = 7, 
+       height = 7, 
+       units = "in")
+
+ggsave(paste(output_path, "map_transect", 
+             ".pdf",sep=""), 
+       plot = map_transect , 
+       width = 8, 
+       height = 7, 
+       units = "in")
+
+```
+
+# Save all ggplot-objects automatically
+
+This automatic saving does not remember the size settings in each R-chunk.
+
+```{r, save_function}
+
+#Sätt output-path
+output_path <- "/Figures/"
+
+# Lista alla objekt och välj endast ggplot-objekten
+ggplot_objects <- ls(envir = .GlobalEnv)  # Lista alla objekt
+ggplot_objects <- ggplot_objects[sapply(ggplot_objects, function(x) inherits(get(x), "gg"))]  # Filtrera de som är ggplot-objekt
+
+# Funktion för att spara varje plot
+save_plots <- function(plot_objects, path) {
+  for (plot_name in plot_objects) {
+    plot <- get(plot_name)  # Hämta plot-objektet
+    file_name <- paste0(path, plot_name, ".pdf")  # Skapa filnamnet
+    ggsave(file_name, plot)  # Spara plotten
+  }
+}
+
+# Spara alla plots
+save_plots(ggplot_objects, output_path)
+
+```
+
+# Save dataframes
+
+```{r, save_data}
+
+library(writexl)
+
+#Sätt output-path
+output_path <- "/Data_output/"
+
+#Save merged dataset: depth_averages_combined
+write_xlsx((depth_averages_combined), paste(output_path, "depth_averages_combined", ".xlsx",sep=""))
+
+#Save the data used in each plot:
+
+write_xlsx((combined_plot_linear_per_station)[["data"]], 
+           paste(output_path, "combined_plot_station", ".xlsx", sep = ""))
+
+write_xlsx((combined_plot_location)[["data"]], 
+           paste(output_path, "combined_plot_location", ".xlsx", sep = ""))
+
+write_xlsx((combined_plot_din_station)[["data"]], 
+           paste(output_path, "combined_plot_din_station", ".xlsx", sep = ""))
+
+write_xlsx((combined_plot_din_location)[["data"]], 
+           paste(output_path, "combined_plot_din_location", ".xlsx", sep = ""))
+
+write_xlsx((combined_plot_dip_station)[["data"]], 
+           paste(output_path, "combined_plot_dip_station", ".xlsx", sep = ""))
+
+write_xlsx((combined_plot_dip_location)[["data"]], 
+           paste(output_path, "combined_plot_dip_location", ".xlsx", sep = ""))
+
+write_xlsx((combined_plot_location)[["data"]], 
+           paste(output_path, "combined_plot_location", ".xlsx", sep = ""))
+
+write_xlsx((limiting_nutrient)[["data"]], 
+           paste(output_path, "limiting_nutrient", ".xlsx", sep = ""))
+
+write_xlsx((limiting_nutrient_interval)[["data"]], 
+           paste(output_path, "limiting_nutrient_interval", ".xlsx", sep = ""))
+
+```
